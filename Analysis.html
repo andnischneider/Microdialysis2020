@@ -297,9 +297,8 @@ div.tocify {
   library(lefser)
 })
 
-source(here(&quot;src/featureSelection.R&quot;))
-source(here(&quot;src/utilsDE.r&quot;))
-source(here(&quot;src/plotUpAndDown.R&quot;))</code></pre>
+source(here(&quot;src/UPSCb-common/src/R/featureSelection.R&quot;))
+source(here(&quot;src/UPSCb-common/Rtoolbox/src/utilsDE.r&quot;))</code></pre>
 <div id="import-data" class="section level1">
 <h1>Import data</h1>
 <p>We start with importing the preprocessed data and filtering out very low abundant taxa.</p>
@@ -396,6 +395,7 @@ length(intersect(rownames(seqtab.sw5_MQ), rownames(seqtab.sw5_su)))</code></pre>
 <pre><code>## [1] 20</code></pre>
 <pre class="r"><code>length(setdiff(rownames(seqtab.sw5_su), rownames(seqtab.sw5_MQ)))</code></pre>
 <pre><code>## [1] 5</code></pre>
+<p>Out of the 206 total filtered SOTUs, 181 are in common between the treatments, 20 unique to the MQ samples, and 5 unique to the Sucrose samples.</p>
 <div id="richness" class="section level2">
 <h2>Richness</h2>
 <pre class="r"><code>rich_MQ &lt;- colSums(seqtab.sw5_MQ&gt;1)
@@ -639,7 +639,7 @@ pheatmap(seqtab.sw5_norm,
 sumobj_zinb2 &lt;- zinbwave(sumobj, K = 0, epsilon = 1e12, normalizedValues = TRUE, residuals = TRUE, observationalWeights = TRUE)</code></pre>
 <pre><code>## Warning in .local(Y, ...): No assay named `counts`, using first assay.Use
 ## `assay` to specify a different assay.</code></pre>
-<p>This again clearly shows the difference between the MQ and sucrose samples, with a number of fungi that are clearly much enriched in the sucrose samples (at the lower end of the heatmap). Interestingly, the litter seems to have a higher influence on what colonizes the sucrose probes (with one outlier).</p>
+<p>This again clearly shows the difference between the MQ and sucrose samples, with a number of fungi that are clearly much enriched in the sucrose samples (at the lower end of the heatmap). Interestingly, the litter seems to have a higher influence on what colonizes the sucrose probes.</p>
 </div>
 <div id="differential-abundance" class="section level2">
 <h2>Differential abundance</h2>

@@ -24,9 +24,8 @@ suppressMessages({
   library(lefser)
 })
 
-source(here("src/featureSelection.R"))
-source(here("src/utilsDE.r"))
-source(here("src/plotUpAndDown.R"))
+source(here("src/UPSCb-common/src/R/featureSelection.R"))
+source(here("src/UPSCb-common/Rtoolbox/src/utilsDE.r"))
 ```
 
 # Import data
