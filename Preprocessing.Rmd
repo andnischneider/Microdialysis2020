@@ -1,0 +1,415 @@
+---
+title: "Microdialysis 2020 data preprocessing"
+author: "Andreas Schneider"
+date: "07/09/2020"
+output: 
+  html_document:
+    code_folding: hide
+    toc: true
+    toc_float: true
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r import}
+suppressMessages(library(here))
+suppressMessages(library(dada2))
+suppressMessages(library(Biostrings))
+suppressMessages(library(ShortRead))
+suppressMessages(library(dplyr))
+suppressMessages(library(reshape2))
+suppressMessages(library(R.utils))
+suppressMessages(library(phyloseq))
+suppressMessages(library(ggplot2))
+```
+
+
+# Introduction
+
+The data will be imported into R and clustered to ASV (amplicon sequencing variants) with the help of the dada2 R package.
+
+# Pre-processing
+
+## Cutting
+
+Locate forward and reverse read files.
+
+```{r}
+path <- here("data/raw")
+
+Fs <- sort(list.files(path, pattern = "R1_001.fastq.gz", full.names = TRUE, recursive = TRUE))
+Rs <- sort(list.files(path, pattern = "R2_001.fastq.gz", full.names = TRUE, recursive = TRUE))
+```
+
+First we check for primers in the data (I think the primers were already removed in theses datasets, but we check just to make sure). First we record their DNA sequences.
+
+```{r primers}
+gITS7 <- "GTGARTCATCGARTCTTTG"
+ITS4 <- "TCCTCCGCTTATTGATATGC"
+```
+
+Next we create a vector with all possible orientations of the primers
+
+```{r primer.orients}
+allOrients <- function (primer) {
+  require(Biostrings)
+  dna <- DNAString(primer)
+  orients <- c(Forward = dna, Complement = complement(dna), 
+               Reverse = reverse(dna), RevComp = reverseComplement(dna))
+  return(sapply(orients, toString))
+}
+gITS7.orients <- allOrients(gITS7)
+ITS4.orients <- allOrients(ITS4)
+```
+
+The presence of ambiguous bases (Ns) in the sequencing reads makes accurate mapping of short primer sequences difficult. Next we are going to “pre-filter” the sequences just to remove those with Ns, but perform no other filtering.
+
+```{r cache=TRUE}
+Fs.filtN <- file.path(path, "filtN", basename(Fs))
+Rs.filtN <- file.path(path, "filtN", basename(Rs))
+filterAndTrim(Fs, Fs.filtN, Rs, Rs.filtN, maxN = 0, multithread = TRUE)
+```
+
+Now we can count the number of times the primer sequences appear in the samples.
+
+```{r cache=TRUE}
+primerHits <- function (primer, fn) {
+  nhits <- vcountPattern(primer, sread(readFastq(fn)), fixed = FALSE)
+  return(sum(nhits > 0))
+}
+rbind(FWD.ForwardReads = sapply(gITS7.orients, primerHits, fn = Fs.filtN[[1]]),
+      FWD.ReverseReads = sapply(gITS7.orients, primerHits, fn = Rs.filtN[[1]]),
+      REV.ForwardReads = sapply(ITS4.orients, primerHits, fn = Fs.filtN[[1]]),
+      REV.ReverseReads = sapply(ITS4.orients, primerHits, fn = Rs.filtN[[1]]))
+```
+
+There are a few hits after all, so we proceed with the cutting step.
+
+```{r}
+cutadapt <- "/mnt/picea/home/aschneider/.conda/envs/amp_seq/bin/cutadapt"
+system2(cutadapt, args = "--version")
+```
+
+```{r cache=TRUE,include=FALSE}
+path.cut <- file.path(path, "cutadapt")
+if(!dir.exists(path.cut)) dir.create(path.cut)
+Fs.cut <- file.path(path.cut, basename(Fs))
+Rs.cut <- file.path(path.cut, basename(Rs))
+
+gITS7.rc <- rc(gITS7)
+ITS4.rc <- rc(ITS4)
+
+#Trim FWD and revcomp of REV off of R1
+R1.flags <- paste("-g", gITS7, "-a", ITS4.rc)
+#Trim rev and rc of fw off of R2
+R2.flags <- paste("-G", ITS4, "-A", gITS7.rc)
+#Run Cutadapt
+for (i in seq_along(Fs)) {
+  system2(cutadapt, args = c(R1.flags, R2.flags, 
+                             "-n", 2,
+                             "--minimum-length", 50,
+                             "-o", Fs.cut[i],
+                             "-p", Rs.cut[i],
+                             Fs.filtN[i],
+                             Rs.filtN[i]))
+}
+
+rbind(FWD.ForwardReads = sapply(gITS7.orients, primerHits, fn = Fs.cut[[2]]),
+      FWD.ReverseReads = sapply(gITS7.orients, primerHits, fn = Rs.cut[[2]]),
+      REV.ForwardReads = sapply(ITS4.orients, primerHits, fn = Fs.cut[[2]]),
+      REV.ReverseReads = sapply(ITS4.orients, primerHits, fn = Rs.cut[[2]]))
+```
+The sanity check looks good, all primer sequences have been removed from the data (weirdly it still finds one, but I don't think that's gonna be an issue).
+
+## Quality profiles
+
+Now we can proceed. We start with extracting the sample names and plotting Quality profiles for the first 4 samples.
+
+```{r cache=TRUE}
+sample.names <- paste(sapply(strsplit(basename(Fs.cut), "_"), `[`, 1),
+                      sapply(strsplit(basename(Fs.cut), "_"), `[`, 2),
+                      sep = "_")
+
+plotQualityProfile(Fs.cut[1:4])
+plotQualityProfile(Rs.cut[1:4])
+```
+
+Looks good.
+
+## Quality filtering and trimming
+
+Next is the quality filtering and trimming.
+
+```{r}
+filtFs <- file.path(path, "filtered_F", basename(Fs.cut))
+filtRs <- file.path(path, "filtered_R", basename(Rs.cut))
+```
+
+```{r cache=TRUE}
+out <- filterAndTrim(Fs.cut, filtFs, Rs.cut, filtRs, maxN = 0, 
+                         maxEE = c(6,6), truncQ = 2, minLen = 50, rm.phix = TRUE, 
+                         compress = TRUE, multithread = TRUE)
+
+head(out, n = 10)
+```
+
+We had to go up to 6 with the mEE parameter to retain a decent number of reads, not unusual with ITS.
+
+## Error learning
+
+The next steps are learning errors and the dada2 algorithm. This takes some time.
+
+```{r}
+errF <- learnErrors(filtFs, multithread = TRUE, verbose = TRUE)
+errR <- learnErrors(filtRs, multithread = TRUE, verbose = TRUE)
+plotErrors(errF, nominalQ = TRUE)
+plotErrors(errR, nominalQ = TRUE)
+```
+
+The estimated error rates (black line) are a good fit to the observed rates (points). Proceed.
+
+## Dereplication
+
+```{r}
+derepFs <- derepFastq(filtFs, verbose = TRUE)
+derepRs <- derepFastq(filtRs, verbose = TRUE)
+#Name by sample names
+names(derepFs) <- sample.names
+names(derepRs) <- sample.names
+```
+
+## Sample inference
+
+```{r}
+dadaFs <- dada(derepFs, err = errF, multithread = TRUE, pool = TRUE, verbose = TRUE)
+dadaRs <- dada(derepRs, err = errR, multithread = TRUE, pool = TRUE, verbose = TRUE)
+```
+
+## Merging read pairs
+
+```{r}
+mergers <- mergePairs(dadaFs, derepFs, dadaRs, derepRs, verbose = TRUE, maxMismatch = 1)
+```
+
+## Sequence table
+```{r}
+seqtab <- makeSequenceTable(mergers)
+
+```
+
+
+## Chimera removal
+
+```{r}
+seqtab.nc <- removeBimeraDenovo(seqtab, method = "consensus", multithread = TRUE, verbose = TRUE)
+```
+
+Let's inspect distribution of sequence lengths:
+
+```{r}
+table(nchar(getSequences(seqtab.nc)))
+```
+
+## Track reads through pipeline
+
+As a final sanity check before proceeding with further steps, let's check that we don't lose too many reads at any particular step:
+
+```{r}
+getN <- function (x) sum(getUniques(x))
+track <- cbind(out, sapply(dadaFs, getN), sapply(dadaRs, getN), rowSums(seqtab), rowSums(seqtab.nc))
+colnames(track) <- c("input", "filtered", "denoisedF", "denoisedR", "merged", "nonchim")
+rownames(track) <- sample.names
+track
+```
+
+Good enough.
+
+
+
+## ITSx
+
+This is where my pipeline diverges from the standard dada2 workflow. In theory you could just assign taxonomy to these ASVs and be done with it, but this approach I have found to yield better results.
+
+ITSx has to be run from the command line, so we need to print our ASV sequences to a fasta file.
+
+```{r}
+seqs <- DNAStringSet(colnames(seqtab.nc))
+names(seqs) <- paste0("ASV", seq(ncol(seqtab.nc)))
+dir.create(here("results/fasta"))
+writeXStringSet(seqs, here("results/fasta/asv_seqs.fa"))
+```
+
+To proceed go to the terminal and run the following commands (usually with a bigger dataset, I would submit ITSx to the queue or run it on my computer, but with this low number of sequences it should be quite fast):
+
+cd CHANGE_TO_DIRECTORY_OF_THIS_REPOSITORY
+module load bioinfo-tools ITSx
+mkdir results/ITSx
+ITSx -i results/fasta/asv_seqs.fa -o results/ITSx/asvs --cpu 1 --multi_thread F --preserve T --partial 50 --minlen 50
+
+To check the results, look at the "summary" file, looks great, 348/363 sequences detected as ITS.
+
+## Import ITSx results and collate (if possible)
+
+```{r}
+seqs_clean <- as.character(readDNAStringSet(here("results/ITSx/asvs.ITS2.full_and_partial.fasta")))
+seqtab.nc2 <- seqtab.nc
+colnames(seqtab.nc2) <- names(seqs)
+seqtab.nc2 <- seqtab.nc2[,colnames(seqtab.nc2)%in%names(seqs_clean)]
+
+colnames(seqtab.nc2) <- seqs_clean
+seqtab.nc2 <- t(seqtab.nc2)
+table(nchar(getSequences(t(seqtab.nc2))))
+
+#There is no sequences below 50bp, so no problem here
+#seqs_clean <- seqs_clean[!(nchar(seqs_clean)<50)]
+#seqtab.nc2 <- seqtab.nc2[nchar(rownames(seqtab.nc2))>50,]
+
+#At this point we can summarise all identical sequences 
+seqtab.nc3 <- cbind.data.frame(sequence=rownames(seqtab.nc2), seqtab.nc2)
+seqtab.nc4 <- group_by(seqtab.nc3, sequence) %>% 
+  summarise_each(funs(sum)) 
+seqtab.nc5 <- seqtab.nc4[,-1]
+rownames(seqtab.nc5) <- seqtab.nc4$sequence
+seqtab.nc5 <- data.matrix(t(seqtab.nc5))
+track2 <- cbind(track, itsx=rowSums(seqtab.nc5))
+track2
+#saveRDS(track2, here("results/read_stats.rds"))
+```
+
+Barely any reads got lost here, great. Now with the cut and summarised sequences we proceed to cluster with swarm.
+
+## Swarm clustering
+
+Swarm needs abundance info included, I will use the sum of counts in all samples.
+
+```{r}
+seqs_clean_sum <- DNAStringSet(colnames(seqtab.nc5))
+#New ASV names for clean sequences
+names(seqs_clean_sum) <- paste0("ASV", 1:length(seqs_clean_sum))
+names(seqs_clean_sum) <- paste0(names(seqs_clean_sum), ";size=", colSums(seqtab.nc5))
+dir.create(here("results/Swarm"))
+writeXStringSet(seqs_clean_sum, file = here("results/ITSx/asvs_cut_clean.fa"))
+```
+
+Now we can run swarm on these cut ASVs with the summed abundances, and re-import the clusters it creates.
+
+Again, open the terminal, and run:
+
+module load bioinfo-tools swarm
+swarm -d 3 -z --output-file results/Swarm/results.txt --seeds results/Swarm/seeds.fa results/ITSx/asvs_cut_clean.fa
+
+315 clusters generated. I will import the Swarm clusters as a factor that will enable a summarisation.
+
+```{r}
+clustfact <- function(file) {
+  clus <- readr::read_tsv(file, col_names = FALSE)
+  clus <- stringr::str_split_fixed(clus$X1, pattern = " ", n = max(stringr::str_count(clus$X1, "ASV")))
+  rownames(clus) <- paste0("cluster", 1:nrow(clus))
+  clus <- melt(as.matrix(clus))[,-2]
+  clus <- clus[grepl("ASV", clus$value),]
+  clus$value <- gsub(";size=\\d+", "", clus$value)
+  #clus2 <- as.factor(clus$Var1)
+  #names(clus2) <- clus$value
+  colnames(clus) <- c("Cluster", "ASV")
+  #clus$Cluster <- as.character(clus$Cluster)
+  return(clus)
+}
+clus_swarm <- clustfact(here("results/Swarm/results.txt"))
+```
+
+Now we can add this factor as a column to our matrix, and summarise the counts by cluster.
+
+```{r}
+seqtab.sw <- as.data.frame(cbind(Cluster=clus_swarm$Cluster[match(gsub(";size=\\d+", "", names(seqs_clean_sum)), clus_swarm$ASV)], t(seqtab.nc5)))
+
+seqtab.sw <- group_by(seqtab.sw, Cluster) %>% 
+  summarise_each(funs(sum)) 
+seqtab.sw$Cluster <- paste0("Cluster", seqtab.sw$Cluster)
+seqtab.sw2 <- seqtab.sw
+rownames(seqtab.sw2) <- seqtab.sw$Cluster
+seqtab.sw2 <- data.matrix(seqtab.sw2[,-1])
+seqtab.sw3 <- seqtab.sw2
+```
+
+The counts are now summarised by cluster. Next we can assign taxonomy to these SOTUs (Swarm Operational Taxonomic Units) and then start with the actual analyses. To assign taxonomy we take the seed sequence of every cluster.
+
+```{r}
+seqs_clean_swarm <- readDNAStringSet(here("results/Swarm/seeds.fa"))
+names(seqs_clean_swarm) <- seqtab.sw$Cluster 
+
+rownames(seqtab.sw3) <- as.character(seqs_clean_swarm)
+seqtab.sw3 <- t(seqtab.sw3)
+
+#Link UNITE database
+unite_db <- ("/mnt/picea/storage/reference/Qiime/unite/UNITE_8.2/sh_general_release_dynamic_s_04.02.2020.fasta")
+taxa <- assignTaxonomy(seqtab.sw3, unite_db, tryRC = TRUE, multithread = TRUE)
+```
+
+## Filtering and cleaning
+
+We can start with cleaning up the taxonomic annotations. Then we filter out very low abundance fungi and use the negative control samples to sieve out probable contamination.
+
+```{r}
+#Import metadata
+meta <- read.csv(here("doc/Meta_clean.csv"))
+#Clean taxa
+taxa <- gsub("^[[:alpha:]]__", "", taxa)
+#Create clean matrix
+rownames(seqtab.sw2) <- paste0("SOTU", 1:nrow(seqtab.sw2))
+
+taxa <- as.data.frame(cbind(SOTU=rownames(seqtab.sw2), sequence=rownames(taxa), taxa))
+
+seqtab.sw4 <- seqtab.sw2
+
+#Adjust tax table
+taxa <- taxa[taxa$SOTU%in%rownames(seqtab.sw4),]
+rownames(taxa) <- taxa$SOTU
+
+#Adjust meta table
+rownames(meta) <- meta$SciLifeID
+all(colnames(seqtab.sw4)==rownames(meta))
+
+track3 <- track2
+
+#Remove positive and negative controls from final object
+seqtab.sw5 <- seqtab.sw4[,-c(18,19)]
+
+```
+
+# DECONTAM after Swarm
+
+```{r}
+library(decontam)
+colnames(seqtab.sw4) # our blank is the last of 19 samples
+vector_for_decontam <- c(rep(FALSE, 18), TRUE)
+names(vector_for_decontam) <- colnames(seqtab.sw4)
+
+contam_df <- isContaminant(t(seqtab.sw4), method = "prevalence", neg=vector_for_decontam)
+
+table(contam_df$contaminant) # identified 3 as contaminants
+
+  # getting vector holding the identified contaminant IDs
+contam_asvs <- row.names(contam_df[contam_df$contaminant == TRUE, ])
+```
+
+Only 3 likely contaminants with low abundance.
+
+Save the final objects, and remove the likely contaminants.
+
+```{r}
+seqtab.sw4_f <- seqtab.sw4[which(!rownames(seqtab.sw4) %in% contam_asvs),]
+track4 <- cbind(track3, decontam=colSums(seqtab.sw4_f))
+seqtab.sw5 <- seqtab.sw5[which(!rownames(seqtab.sw5) %in% contam_asvs),]
+taxa <- taxa[rownames(seqtab.sw5),]
+saveRDS(meta, here("results/meta.rds"))
+saveRDS(seqtab.sw5, here("results/seqtab_final.rds"))
+saveRDS(taxa, here("results/taxa.rds"))
+saveRDS(track4, here("results/read_stats.rds"))
+```
+
+
+
+
+
