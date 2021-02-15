@@ -1,0 +1,3 @@
+[submodule "src/UPSCb-common"]
+	path = src/UPSCb-common
+	url = https://github.com/UPSCb/UPSCb-common.git
