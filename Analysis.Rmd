@@ -1,0 +1,395 @@
+---
+title: "Microdialysis 2020 data analysis"
+author: "Andreas Schneider"
+date: "21/09/2020"
+output: 
+  html_document:
+    code_folding: hide
+    toc: true
+    toc_float: true
+---
+
+```{r import}
+suppressMessages({
+  library(here)
+  library(vegan)
+  library(ggplot2)
+  library(gridExtra)
+  library(phyloseq)
+  library(reshape2)
+  library(zinbwave)
+  library(pheatmap)
+  library(DESeq2)
+  library(tidyverse)
+  library(lefser)
+})
+
+source(here("src/featureSelection.R"))
+source(here("src/utilsDE.r"))
+source(here("src/plotUpAndDown.R"))
+```
+
+# Import data
+
+We start with importing the preprocessed data and filtering out very low abundant taxa.
+
+```{r}
+taxa <- readRDS(here("results/taxa.rds"))
+seqtab.sw4 <- readRDS(here("results/seqtab_final.rds"))
+meta <- readRDS(here("results/meta.rds"))
+read_stats <- as.data.frame(readRDS(here("results/read_stats.rds")))
+```
+
+
+
+
+# Read numbers
+
+```{r}
+meta_rel <- meta[c(1:17),]
+read_stats_rel <- read_stats[c(1:17),]
+
+#Input first
+boxplot(read_stats_rel$input~meta_rel$perfusate)
+#Looks very significant!
+shapiro.test(read_stats_rel$input[meta_rel$perfusate=="MQ"])
+shapiro.test(read_stats_rel$input[meta_rel$perfusate=="Sucrose"])
+t.test(read_stats_rel$input~meta_rel$perfusate)
+
+#Final read numbers
+boxplot(read_stats_rel$decontam~meta_rel$perfusate)
+#Looks very significant!
+shapiro.test(read_stats_rel$decontam[meta_rel$perfusate=="MQ"])
+shapiro.test(read_stats_rel$decontam[meta_rel$perfusate=="Sucrose"])
+t.test(read_stats_rel$decontam~meta_rel$perfusate)
+
+sd(read_stats_rel$decontam[meta_rel$perfusate=="MQ"])
+sd(read_stats_rel$decontam[meta_rel$perfusate=="Sucrose"])
+
+```
+
+Sucrose consistently (and significantly) yielded higher number of fungal reads!
+
+# Filtering of low abundance taxa
+
+```{r}
+ccc <- as.factor(meta_rel$perfusate)
+names(ccc) <- meta_rel$SciLifeID
+seqtab.sw5 <- seqtab.sw4[featureSelect(seqtab.sw4, ccc, 3, 2),]
+seqtab.sw5 <- seqtab.sw5[featureSelectProp(seqtab.sw5, ccc, 0.00005),]
+```
+
+# Number of SOTUs
+
+```{r}
+seqtab.sw5_MQ <- seqtab.sw5[,meta_rel$perfusate=="MQ"]
+seqtab.sw5_MQ <- seqtab.sw5_MQ[rowSums(seqtab.sw5_MQ)>sum(seqtab.sw5_MQ)*0.00003,]
+
+seqtab.sw5_su <- seqtab.sw5[,meta_rel$perfusate=="Sucrose"]
+seqtab.sw5_su <- seqtab.sw5_su[rowSums(seqtab.sw5_su)>sum(seqtab.sw5_su)*0.00003,]
+
+length(intersect(rownames(seqtab.sw5_MQ), rownames(seqtab.sw5_su)))
+length(setdiff(rownames(seqtab.sw5_MQ), rownames(seqtab.sw5_su)))
+length(setdiff(rownames(seqtab.sw5_su), rownames(seqtab.sw5_MQ)))
+```
+
+Out of the 206 total filtered SOTUs, 181 are in common between the treatments, 20 unique to the MQ samples, and 5 unique to the Sucrose samples.
+
+## Richness
+
+```{r}
+rich_MQ <- colSums(seqtab.sw5_MQ>1)
+rich_su <- colSums(seqtab.sw5_su>1)
+
+boxplot(rich_MQ, rich_su)
+
+shapiro.test(rich_MQ)
+shapiro.test(rich_su)
+
+wilcox.test(rich_MQ, rich_su, exact = FALSE)
+```
+
+There is no significant difference in the number of SOTUs (excluding singletons) between the treatments.
+
+
+# Data analysis
+
+## Alpha Diversity
+
+The first analysis is basic alpha diversity, assessed by Shannon and Simpson diversity index values.
+
+```{r}
+meta <- meta[colnames(seqtab.sw5),]
+
+divs <- as.data.frame(cbind(Shannon=diversity(t(seqtab.sw5)), Simpson=diversity(t(seqtab.sw5), index = "simpson")))
+divs$perfusate <- meta$perfusate
+divs$litter <- as.factor(meta$Litter)
+
+shan <- ggplot(divs, aes(x = perfusate, y = Shannon, shape = litter))+
+  geom_point()+
+  ggtitle("Shannon Index")+
+  coord_cartesian(ylim = c(0,5))+
+  theme_minimal()+
+  theme(axis.title.x = element_blank(),
+        axis.text.x = element_text(angle = 45, vjust = 0.7))
+
+simp <- ggplot(divs, aes(x = perfusate, y = Simpson, shape = litter))+
+  geom_point()+
+  ggtitle("Simpson Index")+
+  coord_cartesian(ylim = c(0,1))+
+  theme_minimal()+
+  theme(axis.title.x = element_blank(),
+        axis.text.x = element_text(angle = 45, vjust = 0.7))
+
+grid.arrange(shan, simp, ncol = 2)
+min(colSums(seqtab.sw5))
+
+ggplot(divs, aes(x = perfusate, y = Shannon))+
+  geom_boxplot()+
+  ggtitle("Shannon diversity index")+
+  theme_minimal()
+
+wilcox.test(Shannon~perfusate, data = divs)
+
+mean(divs$Shannon[divs$perfusate=="MQ"])
+sd(divs$Shannon[divs$perfusate=="MQ"])
+
+mean(divs$Shannon[divs$perfusate=="Sucrose"])
+sd(divs$Shannon[divs$perfusate=="Sucrose"])
+
+```
+
+The diversity index values are signifcantly higher in the MQ samples. This might sound counterintuitive at first, but most likely the sucrose probes have a lower evenness due to some species dominating the community after having a competitive advantage over others.
+The litter does not seem to have an influence on alpha diversity.
+
+
+## Beta diversity
+
+In order to look at the beta diversity, we have to normalise the data in some way. For the purpose of dimensionality reduction I will rarefy.
+
+```{r}
+counts_rar <- t(rrarefy(t(seqtab.sw5), min(colSums(seqtab.sw5))))
+
+ps_rar <- phyloseq(otu_table(seqtab.sw5, taxa_are_rows = TRUE),
+                   sample_data(meta))
+r.ord <- ordinate(ps_rar, "MDS", "bray")
+
+#Scree Plot
+percentages <- data.frame(PCo=paste0("PCo", seq(1, length(r.ord$values$Relative_eig), 1)),
+                          percent=round(r.ord$values$Relative_eig*100, digits = 1))
+barplot(percentages$percent, names.arg = percentages$PCo)
+
+plot_ordination(ps_rar, r.ord, type = "samples", color = "perfusate", shape = "Litter")+
+  geom_point(size = 4)+
+  xlab(paste0("PCoA 1 [", round(r.ord$values$Relative_eig[1]*100, digits = 1), "%]"))+
+  ylab(paste0("PCoA 2 [", round(r.ord$values$Relative_eig[2]*100, digits = 1), "%]"))+
+  theme(legend.position = "none")+
+  theme_classic()
+
+plot_ordination(ps_rar, r.ord, type = "samples", color = "perfusate", shape = "Litter", axes = 3:4)+
+  geom_point(size = 4)+
+  xlab(paste0("PCoA 3 [", round(r.ord$values$Relative_eig[3]*100, digits = 1), "%]"))+
+  ylab(paste0("PCoA 4 [", round(r.ord$values$Relative_eig[4]*100, digits = 1), "%]"))+
+  theme(legend.position = "none")+
+  theme_classic()
+
+```
+
+
+
+Looks like the communities are very clearly separated between MQ and sucrose, and litter and no litter is separating in principal coordinate 4.
+
+
+## Barplots with taxonomical distribution
+
+```{r}
+count_melt <- melt(seqtab.sw5, varnames = c("SOTU", "SciLifeID"), value.name = "Count")
+count_melt <- count_melt[count_melt$Count>0,]
+count_melt <- merge.data.frame(count_melt, meta, by = "SciLifeID")
+count_melt <- merge.data.frame(count_melt, taxa, by = "SOTU")
+
+pp <- ggplot(count_melt, aes(x = SampleID, y = Count, fill = Phylum))+
+  geom_bar(stat = "identity", position = "fill")+
+  scale_y_continuous(labels = scales::percent)+
+    ggtitle("Bar plot, Phylum level")+
+  #scale_fill_manual(values = sample(hue_pal()(length(unique(count_melt$Family)))))+
+  theme(axis.text = element_text(angle = 45))
+pp
+
+pc <- ggplot(count_melt, aes(x = SampleID, y = Count, fill = Class))+
+  geom_bar(stat = "identity", position = "fill")+
+  scale_y_continuous(labels = scales::percent)+
+    ggtitle("Bar plot, Class level")+
+  #scale_fill_manual(values = sample(hue_pal()(length(unique(count_melt$Family)))))+
+  theme(axis.text = element_text(angle = 45))
+pc
+```
+
+It looks like there are consistent changes between the treatments, e.g. higher relative abundance of Ascomycota in the Sucrose samples.
+
+## Test Class and Phylum abundance for statistical significance
+
+To test statistically which classes and phyla are statistically different between the treatments, we can start with summarizing counts to Phylum and Class level.
+
+```{r}
+class_mat <- acast(count_melt, Class~SciLifeID, value.var = "Count", fun.aggregate = sum)
+phylum_mat <- acast(count_melt, Phylum~SciLifeID, value.var = "Count", fun.aggregate = sum)
+```
+
+After some deliberating and searching, I found a tool called Linear discriminant analysis of effect size (lefse) to test for statistical significance of relative abundance of Classes and Phyla. It comes with a straight-forward visualization:
+
+```{r}
+set.seed(600)
+meta_rel$perfusate <- as.factor(meta_rel$perfusate)
+
+sumobj_class <- SummarizedExperiment(assays <- list(as.matrix(class_mat)),
+                               colData = meta_rel)
+
+res_lefs_c <- lefser(sumobj_class, groupCol = "perfusate")
+
+lefserPlot(res_lefs_c)+
+  theme_minimal()+
+  ggtitle("Class level LDA scores")
+
+sumobj_phyl <- SummarizedExperiment(assays <- list(as.matrix(phylum_mat)),
+                                     colData = meta_rel)
+
+res_lefs_p <- lefser(sumobj_phyl, groupCol = "perfusate")
+
+lefserPlot(res_lefs_p)+
+  theme_minimal()+
+  ggtitle("Phylum level LDA scores")
+
+#Tables with average relative abundances of differentially abundant Phyla and classes:
+class_mat_p <- prop.table(class_mat, margin = 2)*100
+class_mat_p_r <- class_mat_p[res_lefs_c$Names[res_lefs_c$Names!="`NA`"],]
+class_mat_p_r_m <- merge.data.frame(melt(class_mat_p_r, varnames = c("Class", "SciLifeID")), meta_rel, by = "SciLifeID")
+class_mat_p_r_m2 <- aggregate(class_mat_p_r_m$value, list(paste(class_mat_p_r_m$Class, class_mat_p_r_m$perfusate, sep = "_")), mean)
+class_mat_p_r_m2[,3:4] <- str_split_fixed(class_mat_p_r_m2$Group.1, "_", 2)
+class_mat_p_r_m2 <- class_mat_p_r_m2 %>% select(2:4) %>% relocate(V3, V4)
+colnames(class_mat_p_r_m2) <- c("Class", "Perfusate", "Mean_Abund")
+class_mat_p_r_m3 <- aggregate(class_mat_p_r_m$value, list(paste(class_mat_p_r_m$Class, class_mat_p_r_m$perfusate, sep = "_")), sd)
+class_mat_p_r_m3[,3:4] <- str_split_fixed(class_mat_p_r_m3$Group.1, "_", 2)
+colnames(class_mat_p_r_m3)[2:4] <- c("SD", "Class", "Perfusate")
+class_mat_p_r_m2 <- cbind(class_mat_p_r_m2, class_mat_p_r_m3$SD)
+class_mat_p_r_m2
+
+phylum_mat_p <- prop.table(phylum_mat, margin = 2)*100
+phylum_mat_p_r <- phylum_mat_p[res_lefs_p$Names[res_lefs_p$Names!="`NA`"],]
+phylum_mat_p_r_m <- merge.data.frame(melt(phylum_mat_p_r, varnames = c("Class", "SciLifeID")), meta_rel, by = "SciLifeID")
+phylum_mat_p_r_m2 <- aggregate(phylum_mat_p_r_m$value, list(paste(phylum_mat_p_r_m$Class, phylum_mat_p_r_m$perfusate, sep = "_")), mean)
+phylum_mat_p_r_m2[,3:4] <- str_split_fixed(phylum_mat_p_r_m2$Group.1, "_", 2)
+phylum_mat_p_r_m2 <- phylum_mat_p_r_m2 %>% select(2:4) %>% relocate(V3, V4)
+colnames(phylum_mat_p_r_m2) <- c("Phylum", "Perfusate", "Mean_Abund")
+phylum_mat_p_r_m3 <- aggregate(phylum_mat_p_r_m$value, list(paste(phylum_mat_p_r_m$Class, phylum_mat_p_r_m$perfusate, sep = "_")), sd)
+phylum_mat_p_r_m3[,3:4] <- str_split_fixed(phylum_mat_p_r_m3$Group.1, "_", 2)
+colnames(phylum_mat_p_r_m3)[2:4] <- c("SD", "Class", "Perfusate")
+phylum_mat_p_r_m2 <- cbind(phylum_mat_p_r_m2, phylum_mat_p_r_m3$SD)
+as_tibble(phylum_mat_p_r_m2)
+```
+
+MQ: group 0
+Sucrose: group 1
+
+The bars showing up in the plots are significant (p<0.05). So only Pezizomycetes are more abundant in MQ, while Eurotio-, Sordario-, Mucoro-, and Tremellomycetes are higher abundant in the sucrose treatment. Also a higher proportion of reads unidentified at class level were found in the sucrose treatment. The only Basidiomycota class (Tremellomycetes) seems to consist of mostly parasites (with reported parasitism on fungi, plants and animals) that also have more harmless yeast-like stages, that have been described as "ubiquitous elemenents of aquatic and terrestrial ecosystems (McLaughlin et al., 2014).
+
+On Phylum level the only significant changes are that there are more Ascomycota, Mucoromycota, and Mortierellomycota in the sucrose samples (and also more unidentified reads).
+
+## Clustered heatmap of normalized values
+
+We normalize our count matrix using the zero inflation negative binomial method and plot the normalized values as a clustered heatmap.
+
+```{r}
+## Create summarised experiment object
+sumobj <- SummarizedExperiment(assays <- list(as.matrix(seqtab.sw5)),
+                               colData = meta_rel)
+
+sumobj_zinb <- zinbwave(sumobj, K = 2, epsilon = nrow(seqtab.sw5), normalizedValues = TRUE, residuals = TRUE)
+
+#W <- reducedDim(sumobj_zinb)
+
+seqtab.sw5_norm <- assay(sumobj_zinb, "normalizedValues")
+
+sample_cols <- data.frame(Perfusate=meta_rel$perfusate,Litter=meta_rel$Litter, row.names = meta_rel$SciLifeID)
+
+sample_rows <- data.frame(Phylum=taxa$Phylum[match(rownames(seqtab.sw5_norm), taxa$SOTU)], row.names = taxa$SOTU[match(rownames(seqtab.sw5_norm), taxa$SOTU)])
+
+pheatmap(seqtab.sw5_norm,
+         show_rownames = FALSE,
+         labels_col = meta_rel$SampleID,
+         clustering_distance_cols = "correlation",
+         annotation_col = sample_cols, 
+         annotation_row = sample_rows,
+         clustering_method = "ward.D")
+
+
+#Repeat with k=0 and epsilon=1e12 for DESeq
+sumobj_zinb2 <- zinbwave(sumobj, K = 0, epsilon = 1e12, normalizedValues = TRUE, residuals = TRUE, observationalWeights = TRUE)
+
+```
+
+This again clearly shows the difference between the MQ and sucrose samples, with a number of fungi that are clearly much enriched in the sucrose samples (at the lower end of the heatmap). Interestingly, the litter seems to have a higher influence on what colonizes the sucrose probes.
+
+## Differential abundance
+
+```{r}
+dds <- DESeqDataSet(sumobj_zinb2, design = ~ perfusate)
+
+dds <- DESeq(dds, sfType = "poscounts", useT = TRUE, minmu = 1e-6)
+
+res <- lfcShrink(dds, contrast = c("perfusate", "Sucrose", "MQ"), type = "normal")
+
+res2 <- filterDE(res)
+dim(res2)
+sum(res2$log2FoldChange>0)
+```
+
+19 out of 22 significantly differentially abundant SOTUs are more abundant in Sucrose!
+
+These are the taxonomic annotations of the DA SOTUs:
+
+```{r}
+cbind(as.data.frame(res2)[,c(2,6)],taxa[rownames(res2),-c(1:3)])
+```
+
+
+## Differential abundance between litter and non-litter sucrose samples
+
+```{r}
+sumobj_su <- SummarizedExperiment(assays <- list(as.matrix(seqtab.sw5_su)),
+                               colData = meta_rel[meta_rel$perfusate=="Sucrose",])
+
+sumobj_zinb_su <- zinbwave(sumobj_su, K = 0, epsilon = 1e12, normalizedValues = TRUE, residuals = TRUE, observationalWeights = TRUE)
+
+dds_su <- DESeqDataSet(sumobj_zinb_su, design = ~ Litter)
+
+dds_su <- DESeq(dds_su, sfType = "poscounts", useT = TRUE, minmu = 1e-6)
+
+res_su <- lfcShrink(dds_su, contrast = c("Litter", "Yes", "No"), type = "normal")
+
+res_su2 <- filterDE(res_su)
+dim(res_su2)
+sum(res_su2$log2FoldChange>0)
+```
+
+DESeq2 does not find any signficantly differentially abundant SOTUs between litter and no litter for the sucrose treatment. Just to be sure let us also do the same using lefse:
+
+```{r}
+set.seed(600)
+meta_rel$Litter <- as.factor(meta_rel$Litter)
+levels(meta_rel$Litter)
+
+sumobj_su2 <- SummarizedExperiment(assays <- list(as.matrix(seqtab.sw5_su)),
+                                     colData = meta_rel[meta_rel$perfusate=="Sucrose",])
+
+res_lefs_su2 <- lefser(sumobj_su2, groupCol = "Litter")
+
+lefserPlot(res_lefs_su2)+
+  theme_minimal()+
+  ggtitle("SOTU level LDA scores Sucrose samples (litter vs no litter)")
+
+taxa[res_lefs_su2$Names,-2]
+```
+
+The lefse method finds 3 SOTUs with higher relative abundance in litter samples. I have verified these for false positives by randomly switching the order of samples.
+
