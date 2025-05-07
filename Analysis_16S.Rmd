@@ -1,0 +1,760 @@
+---
+title: "Microdialysis 16S analysis"
+author: "Andreas Schneider"
+date: "05/07/2023"
+output: 
+  html_document:
+    code_folding: hide
+    toc: true
+    toc_float: true
+    number_sections: true
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+suppressMessages({
+  library(here)
+  library(vegan)
+  library(RColorBrewer)
+  library(ggplot2)
+  library(gridExtra)
+  library(phyloseq)
+  library(reshape2)
+  library(lefser)
+  library(zinbwave)
+  library(pheatmap)
+  library(DESeq2)
+  library(agricolae)
+  library(grid)
+  library(gridExtra)
+  library(dplyr)
+  source(here("UPSCb-common/src/R/featureSelection.R"))
+  source(here("Rtoolbox/src/utilsDE.r"))
+})
+
+```
+
+
+
+# Import Data
+
+```{r}
+taxa <- read.delim(here("data/NO_PLANT_ASV_tax_species.txt"))
+colnames(taxa)[1] <- "SHA_ID"
+taxa$ASV_ID <- paste0("ASV_", 1:nrow(taxa))
+rownames(taxa) <- taxa$ASV_ID
+
+#Clean up taxonomy.
+taxa$Species <- ifelse(taxa$Species_exact!="", taxa$Species_exact, taxa$Species)
+
+
+taxa[taxa==""] <- NA
+
+
+taxa[is.na(taxa)] <- "unidentified"
+
+taxa$Phylum <- ifelse(grepl("unidentified", taxa$Phylum), 
+                         paste0("Unclassified.", taxa$Kingdom),
+                         taxa$Phylum)
+
+#Let's make a function to automate this
+fixNAtax <- function(tax, rank) {
+  coln <- which(colnames(tax)==rank)
+  namen <- colnames(tax)[coln]
+  namen1 <- colnames(tax)[coln-1]
+  tax[,namen] <- ifelse(grepl("Unclassified", tax[,namen1]),
+                        tax[,namen1],
+                        tax[,namen])
+  tax[,namen] <- ifelse(grepl("unidentified", tax[,namen]),
+                        paste0("Unclassified.", tax[,namen1]),
+                        tax[,namen])
+  return(tax)
+}
+taxa2 <- fixNAtax(taxa, "Class")
+taxa2 <- fixNAtax(taxa2, "Order")
+taxa2 <- fixNAtax(taxa2, "Family")
+taxa2 <- fixNAtax(taxa2, "Genus")
+taxa2 <- fixNAtax(taxa2, "Species")
+
+taxa2$Species <- ifelse(grepl("Unclassified", taxa2$Species), taxa2$Species, paste0(taxa2$Genus, "_", taxa2$Species))
+
+#Import counts
+seqtab <- read.delim(here("data/NO_PLANT_ASV_table.txt"), row.names = 1)
+seqtab <- seqtab[,-c(15)]
+
+all(rownames(seqtab)==taxa$SHA_ID)
+rownames(seqtab) <- taxa2$ASV_ID
+
+meta <- read.delim(here("doc/metadata_Z.txt"), row.names = NULL)
+colnames(meta)[1:3] <- colnames(meta)[2:4]
+#remove color column; remove mock
+meta <- meta[-18,-c(3,4)]
+
+meta$perfusate <- ifelse(grepl("MQ", meta$condition), "MQ", "Sucrose")
+meta$Litter <- ifelse(grepl("L", meta$condition), "Litter", "No_Litter")
+meta$condition2 <- paste0(meta$perfusate, ".", meta$Litter)
+```
+
+# Read counts
+
+```{r}
+boxplot(colSums(seqtab)~meta$condition2)
+
+```
+
+Better than in the ITS dataset, checking optimal cycle number is worth it.
+
+# ASVs unique to Sucrose/MQ (ignoring litter)
+
+```{r}
+seqtab <- seqtab[,meta$ID]
+
+##Filtering low abundance ASVs
+ccc <- as.factor(meta$perfusate)
+names(ccc) <- meta$ID
+#dim(seqtab)
+seqtab.f1 <- seqtab[featureSelect(data.matrix(seqtab), ccc, 3, 2),]
+#dim(seqtab.f1)
+seqtab.f2 <- seqtab.f1[featureSelectProp(data.matrix(seqtab.f1), ccc, 0.00005),]
+dim(seqtab.f2)
+
+##Overlap between sucrose and mq
+seqtab_MQ <- seqtab.f2[,meta$condition2=="MQ.No_Litter"]
+seqtab_MQ <- seqtab_MQ[rowSums(seqtab_MQ)>sum(seqtab_MQ)*0.00003,]
+
+seqtab_su <- seqtab.f2[,meta$condition2=="Sucrose.No_Litter"]
+seqtab_su <- seqtab_su[rowSums(seqtab_su)>sum(seqtab_su)*0.00003,]
+
+length(intersect(rownames(seqtab_MQ), rownames(seqtab_su)))
+length(setdiff(rownames(seqtab_MQ), rownames(seqtab_su)))
+length(setdiff(rownames(seqtab_su), rownames(seqtab_MQ)))
+```
+
+Similar to ITS, more unique ASVs in MQ samples.
+
+## ASVs unique between other comparisons
+
+### MQ vs MQ + litter
+
+```{r}
+seqtab_MQ.L <- seqtab.f2[,meta$condition2=="MQ.Litter"]
+seqtab_MQ.L <- seqtab_MQ.L[rowSums(seqtab_MQ.L)>sum(seqtab_MQ.L)*0.00003,]
+
+length(intersect(rownames(seqtab_MQ), rownames(seqtab_MQ.L)))
+length(setdiff(rownames(seqtab_MQ), rownames(seqtab_MQ.L)))
+length(setdiff(rownames(seqtab_MQ.L), rownames(seqtab_MQ)))
+
+```
+
+### MQ+litter vs Sucrose+litter
+
+```{r}
+seqtab_su.L <- seqtab.f2[,meta$condition2=="Sucrose.Litter"]
+seqtab_su.L <- seqtab_su.L[rowSums(seqtab_su.L)>sum(seqtab_su.L)*0.00003,]
+
+length(intersect(rownames(seqtab_MQ.L), rownames(seqtab_su.L)))
+length(setdiff(rownames(seqtab_MQ.L), rownames(seqtab_su.L)))
+length(setdiff(rownames(seqtab_su.L), rownames(seqtab_MQ.L)))
+```
+
+## ASVs common for all treatments
+
+```{r}
+asvs_common_all <- Reduce(intersect, list(rownames(seqtab_MQ), 
+                       rownames(seqtab_su), 
+                       rownames(seqtab_MQ.L), 
+                       rownames(seqtab_su.L)))
+length(asvs_common_all)
+
+taxa_com_all <- taxa2[asvs_common_all,c(4:9,13)]
+
+```
+
+## ASVs unique to only one of the treatments
+
+Order: MQ, MQ+litter, Sucrose, Sucrose+litter
+
+```{r}
+asvs_mq <- rownames(seqtab_MQ)
+asvs_mq.l <- rownames(seqtab_MQ.L)
+asvs_su <- rownames(seqtab_su)
+asvs_su.l <- rownames(seqtab_su.L)
+
+#Unique to MQ
+sum(!asvs_mq%in%unique(c(asvs_mq.l, asvs_su, asvs_su.l)))
+#Unique to MQ Litter
+sum(!asvs_mq.l%in%unique(c(asvs_mq, asvs_su, asvs_su.l)))
+#Unique to Sucrose
+sum(!asvs_su%in%unique(c(asvs_mq.l, asvs_mq, asvs_su.l)))
+#Unique to Sucrose+litter
+sum(!asvs_su.l%in%unique(c(asvs_mq.l, asvs_su, asvs_mq)))
+
+```
+```{r}
+#MQ
+mq_ex <- asvs_mq[!asvs_mq%in%unique(c(asvs_mq.l, asvs_su, asvs_su.l))]
+
+seqtab_MQ_p <- prop.table(data.matrix(seqtab_MQ), margin = 2)*100
+seqtab_MQ_p_ex <- seqtab_MQ_p[mq_ex,]
+
+mq_ex_tab <- cbind(Mean=rowMeans(seqtab_MQ_p_ex),
+                   Presence=rowSums(seqtab_MQ_p_ex>0),
+                   taxa2[mq_ex,c(4:9)])
+
+#MQ+Litter
+mq_ex_l <- asvs_mq.l[!asvs_mq.l%in%unique(c(asvs_mq, asvs_su, asvs_su.l))]
+
+seqtab_MQ.L_p <- prop.table(data.matrix(seqtab_MQ.L), margin = 2)*100
+seqtab_MQ.L_p_ex <- seqtab_MQ.L_p[mq_ex_l,]
+
+mq_ex_l_tab <- cbind(Mean=rowMeans(seqtab_MQ.L_p_ex),
+                   Presence=rowSums(seqtab_MQ.L_p_ex>0),
+                   taxa2[mq_ex_l,c(4:9)])
+
+#Sucrose
+su_ex <- asvs_su[!asvs_su%in%unique(c(asvs_mq.l, asvs_mq, asvs_su.l))]
+
+seqtab_su_p <- prop.table(data.matrix(seqtab_su), margin = 2)*100
+seqtab_su_p_ex <- seqtab_su_p[su_ex,]
+
+su_ex_tab <- cbind(Mean=rowMeans(seqtab_su_p_ex),
+                   Presence=rowSums(seqtab_su_p_ex>0),
+                   taxa2[su_ex,c(4:9)])
+
+#Sucrose+Litter
+su_l_ex <- asvs_su.l[!asvs_su.l%in%unique(c(asvs_mq.l, asvs_su, asvs_mq))]
+
+seqtab_su.L_p <- prop.table(data.matrix(seqtab_su.L), margin = 2)*100
+seqtab_su.L_p_ex <- seqtab_su.L_p[su_l_ex,]
+
+su_l_ex_tab <- cbind(Mean=rowMeans(seqtab_su.L_p_ex),
+                   Presence=rowSums(seqtab_su.L_p_ex>0),
+                   taxa2[su_l_ex,c(4:9)])
+
+# mq_ex_tab
+# su_ex_tab
+
+ex_tab_all <- cbind(treatment_spec=c(rep("MQ", nrow(mq_ex_tab)), rep("MQ+Litter", nrow(mq_ex_l_tab)), rep("Sucrose", nrow(su_ex_tab)), rep("Sucrose+Litter", nrow(su_l_ex_tab))), rbind(mq_ex_tab, mq_ex_l_tab, su_ex_tab, su_l_ex_tab))
+ex_tab_all2 <- ex_tab_all
+ex_tab_all2$ASV <- rownames(ex_tab_all2)
+ex_tab_all2 <- ex_tab_all2[,c(1, 4:9, 3, 10, 2)]
+#write.csv(ex_tab_all2, here("results/analysis/uniq_sotus.csv"), row.names = TRUE, quote = FALSE)
+
+```
+
+# Rarefaction curves
+
+```{r}
+rarecurve(t(seqtab.f2), step = 50, label = FALSE, col = brewer.pal(3, "Dark2")[as.numeric(as.factor(meta$perfusate))])
+abline(v = 40000, col = "red")
+```
+
+# Alpha diversity
+
+## Richness (and rarefaction)
+
+```{r}
+#Rarefaction
+set.seed(500)
+seqtab.r <- t(rrarefy(t(seqtab.f2), min(colSums(seqtab.f2))))
+
+seqtab.r_MQ <- t(rrarefy(t(seqtab_MQ), min(colSums(seqtab.f2))))
+seqtab.r_su <- t(rrarefy(t(seqtab_su), min(colSums(seqtab.f2))))
+
+rich_MQ <- colSums(seqtab.r_MQ>1)
+rich_su <- colSums(seqtab.r_su>1)
+
+boxplot(rich_MQ, rich_su, names=c("MQ", "Sucrose"))
+wilcox.test(rich_MQ, rich_su, exact = FALSE)
+
+```
+
+Not significant.
+
+
+### Richness including litter
+
+```{r}
+seqtab_MQ.L <- seqtab.f2[,meta$condition2=="MQ.Litter"]
+seqtab_MQ.L <- seqtab_MQ.L[rowSums(seqtab_MQ.L)>sum(seqtab_MQ.L)*0.00003,]
+
+seqtab_su.L <- seqtab.f2[,meta$condition2=="Sucrose.Litter"]
+seqtab_su.L <- seqtab_su.L[rowSums(seqtab_su.L)>sum(seqtab_su.L)*0.00003,]
+
+seqtab.r_MQ.L <- t(rrarefy(t(seqtab_MQ.L), min(colSums(seqtab.f2))))
+seqtab.r_su.L <- t(rrarefy(t(seqtab_su.L), min(colSums(seqtab.f2))))
+
+rich_MQ.L <- colSums(seqtab.r_MQ.L>1)
+rich_su.L <- colSums(seqtab.r_su.L>1)
+
+boxplot(rich_MQ, rich_su, rich_MQ.L, rich_su.L, names=c("MQ", "Sucrose", "MQ+Litter", "Sucrose+Litter"))
+with(data.frame(Richness=c(rich_MQ, rich_su, rich_MQ.L, rich_su.L), 
+                condition=meta$condition2[match(c(names(rich_MQ), names(rich_MQ.L), names(rich_su), names(rich_su.L)), meta$ID)]), kruskal(Richness, condition, console = TRUE))
+
+
+#Same with ggplot
+rich_nl <- data.frame(Richness=c(rich_MQ, rich_su, rich_MQ.L, rich_su.L), meta)
+rich_nl$Litter <- factor(rich_nl$Litter, levels = c("No_Litter", "Litter"))
+
+ggplot(rich_nl, aes(x = Litter, y = Richness))+
+  geom_boxplot()+
+  facet_wrap(~perfusate)+
+  theme_classic()
+
+ggsave("FigureS1D.pdf",
+       device = "pdf",
+       path = "results/figures",
+       width = 116,
+       height = 70,
+       units = "mm")
+```
+
+
+## Shannon diversity
+
+```{r}
+divs <- as.data.frame(cbind(Shannon=diversity(t(seqtab.f2)), Simpson=diversity(t(seqtab.f2), index = "simpson")))
+divs$perfusate <- meta$perfusate
+divs$litter <- factor(meta$Litter, levels = c("No_Litter", "Litter"))
+divs$condition <- factor(meta$condition2)
+
+(shan1 <- ggplot(divs, aes(x = litter, y = Shannon))+
+  geom_boxplot()+
+  facet_wrap(~perfusate)+
+  theme_minimal())
+
+dir.create(file.path(here("results/figures")), recursive = TRUE, showWarnings = FALSE)
+
+# ggsave("FigureS1B.pdf",
+#        shan1,
+#        device = "pdf",
+#        path = "results/figures",
+#        width = 116,
+#        height = 70,
+#        units = "mm")
+
+div_krus <- with(divs, kruskal(Shannon, condition, console = TRUE))
+
+divs_nl <- divs[divs$litter=="No_Litter",]
+ggplot(divs_nl, aes(x = perfusate, y = Shannon))+
+  geom_boxplot()+
+  ggtitle("No Litter")+
+  theme_minimal()
+
+wilcox.test(Shannon~perfusate, data = divs[divs$litter=="No_Litter",])
+```
+
+# Beta Diversity
+
+```{r}
+taxa_ps <- as.matrix(taxa2[rownames(seqtab.r),])
+rownames(meta) <- meta$ID
+ps_rar <- phyloseq(otu_table(seqtab.r, taxa_are_rows = TRUE),
+                   sample_data(meta),
+                   tax_table(taxa_ps))
+r.ord <- ordinate(ps_rar, "MDS", "bray")
+
+#Scree Plot
+percentages <- data.frame(PCo=paste0("PCo", seq(1, length(r.ord$values$Relative_eig), 1)),
+                          percent=round(r.ord$values$Relative_eig*100, digits = 1))
+barplot(percentages$percent, names.arg = percentages$PCo)
+
+#PCoA plot
+
+(ordplot1 <- plot_ordination(ps_rar, r.ord, type = "samples", color = "perfusate", shape = "Litter")+
+    geom_point(size = 3)+
+    xlab(paste0("PCoA 1 [", round(r.ord$values$Relative_eig[1]*100, digits = 1), "%]"))+
+    ylab(paste0("PCoA 2 [", round(r.ord$values$Relative_eig[2]*100, digits = 1), "%]"))+
+    theme(legend.position = "none")+
+    theme_classic()
+)
+adonis2(phyloseq::distance(ps_rar, method = "bray")~condition2, data = meta)
+adonis2(phyloseq::distance(ps_rar, method = "bray")~Litter, data = meta)
+adonis2(phyloseq::distance(ps_rar, method = "bray")~perfusate, data = meta)
+
+adonis2(t(seqtab.r)~perfusate*Litter, data = meta, by = "terms")
+
+ggsave("Figure4B.pdf",
+       ordplot1,
+       device = "pdf",
+       path = "results/figures",
+       width = 100,
+       height = 70,
+       units = "mm")
+```
+
+Perfusate, litter, and the interaction between the two had a significant effect on community composition.
+
+# Taxonomic composition
+
+## Stacked bar charts
+
+```{r}
+#Barplot Phylum
+count_melt <- melt(seqtab.r, varnames = c("ASV_ID", "ID"), value.name = "Count")
+count_melt <- count_melt[count_melt$Count>0,]
+count_melt <- merge.data.frame(count_melt, meta, by = "ID")
+count_melt <- merge.data.frame(count_melt, taxa2, by = "ASV_ID")
+#count_melt$SampleID <- factor(count_melt$SampleID, levels = c("MQ1", "MQ2","MQ4", "LMQ1", "LMQ2", "LMQ3", "LMQ4", "LMQ5", "S1", "S3", "S4", "S5", "LS1", "LS2", "LS3", "LS4", "LS5"))
+
+
+```
+
+
+## Stacked bar chart family - Phylum and Family
+
+```{r}
+#Create summarised matrices
+count_melt2 <- melt(seqtab.r, varnames = c("ASV_ID", "ID"), value.name = "Count")
+count_melt2 <- count_melt2[count_melt2$Count>0,]
+count_melt2 <- merge.data.frame(count_melt2, meta, by = "ID")
+count_melt2 <- merge.data.frame(count_melt2, taxa2, by = "ASV_ID")
+class_mat <- acast(count_melt2, Class~ID, value.var = "Count", fun.aggregate = sum)
+fam_mat <- acast(count_melt2, Family~ID, value.var = "Count", fun.aggregate = sum)
+phylum_mat <- acast(count_melt2, Phylum~ID, value.var = "Count", fun.aggregate = sum)
+```
+
+```{r}
+count_melt2_phyl <- count_melt2[,c(2,3,11)]
+count_melt2_phyl2 <- count_melt2_phyl %>% 
+  group_by(ID, Phylum) %>% 
+  summarise(Count = sum(Count))
+
+(pp2 <- ggplot(count_melt2_phyl2, aes(x = ID, y = Count, fill = Phylum))+
+    geom_bar(stat = "identity", position = "fill")+
+    scale_y_continuous(labels = scales::percent)+
+    scale_fill_manual(values = c("#c176af",
+                                "#74b93a",
+"#b357c3",
+"#58c173",
+"#d24382",
+"#629342",
+"#6969ca",
+"#bab049",
+"#6c93cf",
+"#dd9334",
+"#4bc3b7",
+"#d34e35",
+"#3f8b64",
+"#c25e65",
+"#75722c",
+"#b77746"))+
+    ggtitle("Bar plot, Phylum level")+
+    theme_classic()+
+    #scale_fill_manual(values = sample(hue_pal()(length(unique(count_melt$Family)))))+
+    theme(axis.text = element_text(angle = 45)))
+```
+
+
+```{r}
+#### Bar plots with only top 15
+fam_top15 <- rownames(fam_mat)[order(rowSums(fam_mat), decreasing = TRUE)][1:15]
+fam_others <- rownames(fam_mat)[order(rowSums(fam_mat), decreasing = TRUE)][16:length(rownames(fam_mat))]
+
+count_melt2 <- count_melt
+count_melt2$Family2 <- ifelse(count_melt2$Family%in%fam_others, "Others", count_melt2$Family)
+count_melt2$Family2 <- factor(count_melt2$Family2, levels = rev(c(fam_top15, "Others")))
+
+count_melt2$ID <- factor(count_melt2$ID, levels = c("ZMQ1", "ZMQ2", "ZMQ4", 
+                                                    "LMQ1", "LMQ2", "LMQ3", "LMQ4", "LMQ5",
+                                                    "Z1", "Z3", "Z4", "Z5",
+                                                    "LS1", "LS2", "LS3", "LS4", "LS5"))
+
+
+
+count_melt2_fam <- count_melt2[,c(2,3,20)]
+count_melt2_fam2 <- count_melt2_fam %>% 
+  group_by(ID, Family2) %>% 
+  summarise(Count = sum(Count))
+
+(pf2 <- ggplot(count_melt2_fam2, aes(x = ID, y = Count, fill = Family2))+
+    geom_bar(stat = "identity", position = "fill")+
+    scale_y_continuous(labels = scales::percent)+
+    scale_fill_manual(values = c("#d3d3d3",
+                                 "#00b144",
+                                 "#a673ff",
+                                 "#b6d165",
+                                 "#4094ff",
+                                 "#908700",
+                                 "#0192c1",
+                                 "#b46b00",
+                                 "#02dbd3",
+                                 "#a11b2f",
+                                 "#315e07",
+                                 "#912b5c",
+                                 "#ddc65b",
+                                 "#ff8c85",
+                                 "#89854f",
+                                 "#feb68e"))+
+    ggtitle("Bar plot, Family level Top 15")+
+    theme_classic()+
+    #scale_fill_manual(values = sample(hue_pal()(length(unique(count_melt$Family)))))+
+    theme(axis.text = element_text(angle = 45)))
+```
+
+Print the figures
+
+```{r}
+# g_legend <- function(a.gplot){ 
+#     tmp <- ggplot_gtable(ggplot_build(a.gplot)) 
+#     leg <- which(sapply(tmp$grobs, function(x) x$name) == "guide-box") 
+#     legend <- tmp$grobs[[leg]] 
+#     legend
+# } 
+# 
+# pp2_legend <- g_legend(pp2) 
+# pf2_legend <- g_legend(pf2) 
+# 
+# pdf(here("results/figures/FigureS3B_legend.pdf"),
+#     width = 6,
+#     height = 8)
+# grid.newpage()
+# grid.draw(pp2_legend) 
+# dev.off()
+# 
+# 
+# 
+# pdf(here("results/figures/Figure5B_legend.pdf"),
+#     width = 10,
+#     height = 8)
+# grid.newpage()
+# grid.draw(pf2_legend) 
+# dev.off()
+```
+
+```{r}
+#  ggsave("FigureS3B.pdf",
+#    pp2 + theme(legend.position = "none"),
+#        device = "pdf",
+#        path = "results/figures",
+#        width = 190,
+#        height = 110,
+#        units = "mm")
+# 
+# ggsave("Figure5B.pdf",
+#    pf2 + theme(legend.position = "none"),
+#        device = "pdf",
+#        path = "results/figures",
+#        width = 190,
+#        height = 110,
+#        units = "mm")
+
+```
+
+## Phylum level significant differences?
+
+```{r}
+set.seed(600)
+meta2 <- meta
+meta2$Litter <- as.factor(meta2$Litter)
+
+sumobj_class <- SummarizedExperiment(assays <- list(as.matrix(phylum_mat)),
+                               colData = meta2)
+
+res_lefs_c <- lefser(sumobj_class, groupCol = "Litter")
+
+lefserPlot(res_lefs_c)+
+  theme_minimal()+
+  ggtitle("Phylum level LDA scores")
+```
+
+0: Litter 1: No Litter
+
+Proteobacteria higher with Litter, Bdellovibrionota without.
+
+## Heatmap
+
+```{r}
+#HEATMAP
+## Create summarised experiment object
+meta$condition2 <- factor(meta$condition2, levels = c("MQ.No_Litter",
+                                                      "MQ.Litter",
+                                                      "Sucrose.No_Litter",
+                                                      "Sucrose.Litter"))
+
+sumobj <- SummarizedExperiment(assays <- list(as.matrix(seqtab.r)),
+                               colData = meta)
+
+sumobj_zinb <- zinbwave(sumobj, K = 2, epsilon = nrow(seqtab.r), normalizedValues = TRUE, residuals = TRUE)
+
+seqtab.r_norm <- assay(sumobj_zinb, "normalizedValues")
+
+sample_cols <- data.frame(Perfusate=meta$perfusate,Litter=meta$Litter, row.names = meta$ID)
+
+sample_rows <- data.frame(Phylum=taxa2$Phylum[match(rownames(seqtab.r_norm), taxa2$ASV_ID)], row.names = taxa2$ASV_ID[match(rownames(seqtab.r_norm), taxa2$ASV_ID)])
+
+ann_colors <- list(
+  Litter = c(No_Litter="darkgreen", Litter="darkred")
+)
+
+pheatmap(seqtab.r_norm,
+         show_rownames = FALSE,
+         labels_col = meta$SampleID,
+         #scale = "row",
+         clustering_distance_cols = "correlation",
+         annotation_col = sample_cols, 
+         annotation_row = sample_rows,
+         annotation_colors = ann_colors,
+         clustering_method = "average")
+
+pheatmap(seqtab.r_norm,
+         show_rownames = FALSE,
+         labels_col = meta$SampleID,
+         #scale = "row",
+         clustering_distance_cols = "correlation",
+         annotation_col = sample_cols, 
+         annotation_row = sample_rows,
+         annotation_colors = ann_colors,
+         filename = here("results/figures/FigureS4B.pdf"))
+```
+
+# Differential abundance
+
+## MQ vs sucrose (excluding litter samples)
+
+```{r}
+sumobj_zinb2 <- zinbwave(sumobj, K = 0, epsilon = 1e12, residuals = TRUE, observationalWeights = TRUE)
+
+#### Differential abundance, only pure mq and sucrose samples
+dds_c2 <- DESeqDataSet(sumobj_zinb2, design = ~ condition2)
+dds_c2 <- DESeq(dds_c2, sfType = "poscounts", useT = TRUE, minmu = 1e-6)
+
+res_c2 <- results(dds_c2, contrast = c("condition2", "MQ.No_Litter", "Sucrose.No_Litter"))
+
+res_c2_2 <- filterDE(res_c2)
+
+da_asvs2 <- cbind(as.data.frame(res_c2_2)[,c(1,2,6)],taxa2[rownames(res_c2_2),-c(1:3)])
+
+#PLOT DA ASVs
+seqtab.r_p <- prop.table(seqtab.r, margin = 2)*100
+
+seqtab.r_p_da <- seqtab.r_p[rownames(da_asvs2),]
+seqtab.r_p_da <- seqtab.r_p_da[,!grepl("L", colnames(seqtab.r_p_da))]
+da_perc <- reshape2::melt(seqtab.r_p_da, 
+                          varnames = c("ASV_ID", "ID"), 
+                          value.name = "Percentage")
+
+da_perc <- merge.data.frame(da_perc, meta, by = "ID")
+da_perc$ASV_Species <- paste0(da_perc$ASV_ID, "_", da_asvs2$Species)
+da_perc$ASV_Species <- factor(da_perc$ASV_Species, levels = rev(unique(da_perc$ASV_Species)))
+
+#da_perc 
+asvs_sorted <- rownames(da_asvs2)[order(da_asvs2$log2FoldChange, decreasing = TRUE)]
+asvs_sorted2 <- paste0(asvs_sorted, "_", da_asvs2$Species[order(da_asvs2$log2FoldChange, decreasing = TRUE)])
+da_perc$ASV_Species <- factor(da_perc$ASV_Species, levels = asvs_sorted2)
+
+ggplot(da_perc, aes(x = ASV_Species, y = Percentage, fill = perfusate))+
+  geom_boxplot()+
+  theme_minimal()+
+  theme(axis.text.x = element_text(angle = 90))+
+  coord_flip()+
+  scale_y_continuous(trans='sqrt')
+
+# ggsave("FigureS5B.pdf",
+#        device = "pdf",
+#        path = "results/figures",
+#        width = 190,
+#        height = 150,
+#        units = "mm")
+```
+```{r}
+#Table for paper
+da_asvs2_cl <- da_asvs2[,c(4:9,13,2,3,1)]
+da_asvs2_cl <- da_asvs2_cl[order(da_asvs2_cl$log2FoldChange),]
+#Reverse lFC for table in paper.
+da_asvs2_cl$log2FoldChange <- da_asvs2_cl$log2FoldChange*-1
+
+#
+```
+
+
+## MQ vs MQ + Litter
+
+```{r}
+######### MQ vs MQ litter
+res_mq_lit <- results(dds_c2, contrast = c("condition2", "MQ.No_Litter", "MQ.Litter"))
+
+res_mq_lit2 <- filterDE(res_mq_lit)
+
+da_asvs_mq_lit <- cbind(as.data.frame(res_mq_lit2)[,c(1,2,6)],taxa2[rownames(res_mq_lit2),-c(1:3)])
+da_asvs_mq_lit[,c(1:8)]
+
+seqtab.r_p_da_mq_lit <- seqtab.r_p[rownames(da_asvs_mq_lit),]
+seqtab.r_p_da_mq_lit <- seqtab.r_p_da_mq_lit[,grepl("MQ", colnames(seqtab.r_p_da_mq_lit))]
+da_perc_mq_lit <- reshape2::melt(seqtab.r_p_da_mq_lit, 
+                                 varnames = c("ASV_ID", "ID"), 
+                                 value.name = "Percentage")
+
+da_perc_mq_lit <- merge.data.frame(da_perc_mq_lit, meta, by = "ID")
+da_perc_mq_lit$ASV_Species <- paste0(da_perc_mq_lit$ASV_ID, "_", da_asvs_mq_lit$Species)
+da_perc_mq_lit$ASV_Species <- factor(da_perc_mq_lit$ASV_Species, levels = rev(unique(da_perc_mq_lit$ASV_Species)))
+
+#da_perc 
+asvs_sorted_mq_lit <- rownames(da_asvs_mq_lit)[order(da_asvs_mq_lit$log2FoldChange, decreasing = TRUE)]
+asvs_sorted_mq_lit2 <- paste0(asvs_sorted_mq_lit, "_", da_asvs_mq_lit$Species[order(da_asvs_mq_lit$log2FoldChange, decreasing = TRUE)])
+da_perc_mq_lit$ASV_Species <- factor(da_perc_mq_lit$ASV_Species, levels = asvs_sorted_mq_lit2)
+
+ggplot(da_perc_mq_lit, aes(x = ASV_Species, y = Percentage, fill = Litter))+
+  geom_boxplot()+
+  theme_minimal()+
+  theme(axis.text.x = element_text(angle = 90))+
+  coord_flip()+
+  scale_y_continuous(trans='sqrt')
+```
+
+```{r}
+#Table for paper
+da_asvs_mq_lit_cl <- da_asvs_mq_lit[,c(4:9,13,2,3,1)]
+da_asvs_mq_lit_cl <- da_asvs_mq_lit_cl[order(da_asvs_mq_lit_cl$log2FoldChange),]
+#Correct for the output method
+da_asvs_mq_lit_cl$log2FoldChange <- da_asvs_mq_lit_cl$log2FoldChange*-1
+
+```
+
+
+## MQ Litter vs Sucrose Litter
+
+```{r}
+####MQ Litter vs Sucrose litter
+res_mql_sucl <- results(dds_c2, contrast = c("condition2", "MQ.Litter", "Sucrose.Litter"))
+
+res_mql_sucl2 <- filterDE(res_mql_sucl)
+
+da_asvs_mql_sucl <- cbind(as.data.frame(res_mql_sucl2)[,c(1,2,6)],taxa2[rownames(res_mql_sucl2),-c(1:3)])
+da_asvs_mql_sucl[,c(1:8)]
+
+seqtab.r_p_da_mql_sucl <- seqtab.r_p[rownames(da_asvs_mql_sucl),]
+seqtab.r_p_da_mql_sucl <- seqtab.r_p_da_mql_sucl[,grepl("L", colnames(seqtab.r_p_da_mql_sucl))]
+da_perc_mql_sucl <- reshape2::melt(seqtab.r_p_da_mql_sucl, 
+                                   varnames = c("ASV_ID", "ID"), 
+                                   value.name = "Percentage")
+
+da_perc_mql_sucl <- merge.data.frame(da_perc_mql_sucl, meta, by = "ID")
+da_perc_mql_sucl$ASV_Species <- paste0(da_perc_mql_sucl$ASV_ID, "_", da_asvs_mql_sucl$Species)
+da_perc_mql_sucl$ASV_Species <- factor(da_perc_mql_sucl$ASV_Species, levels = rev(unique(da_perc_mql_sucl$ASV_Species)))
+
+#da_perc 
+asvs_sorted_mql_sucl <- rownames(da_asvs_mql_sucl)[order(da_asvs_mql_sucl$log2FoldChange, decreasing = TRUE)]
+asvs_sorted_mql_sucl2 <- paste0(asvs_sorted_mql_sucl, "_", da_asvs_mql_sucl$Species[order(da_asvs_mql_sucl$log2FoldChange, decreasing = TRUE)])
+da_perc_mql_sucl$ASV_Species <- factor(da_perc_mql_sucl$ASV_Species, levels = asvs_sorted_mql_sucl2)
+
+ggplot(da_perc_mql_sucl, aes(x = ASV_Species, y = Percentage, fill = perfusate))+
+  geom_boxplot()+
+  theme_minimal()+
+  theme(axis.text.x = element_text(angle = 90))+
+  coord_flip()+
+  scale_y_continuous(trans='sqrt')
+```
+
+```{r}
+#Table for paper
+da_asvs_mql_sucl_cl <- da_asvs_mql_sucl[,c(4:9,13,2,3,1)]
+da_asvs_mql_sucl_cl <- da_asvs_mql_sucl_cl[order(da_asvs_mql_sucl_cl$log2FoldChange),]
+#Correct for the output method
+da_asvs_mql_sucl_cl$log2FoldChange <- da_asvs_mql_sucl_cl$log2FoldChange*-1
+```
+
+
+
+
+
