@@ -23,6 +23,7 @@ suppressMessages(library(reshape2))
 suppressMessages(library(R.utils))
 suppressMessages(library(phyloseq))
 suppressMessages(library(ggplot2))
+suppressMessages(library(decontam))
 ```
 
 
@@ -88,7 +89,7 @@ rbind(FWD.ForwardReads = sapply(gITS7.orients, primerHits, fn = Fs.filtN[[1]]),
 There are a few hits after all, so we proceed with the cutting step.
 
 ```{r}
-cutadapt <- "/mnt/picea/home/aschneider/.conda/envs/amp_seq/bin/cutadapt"
+cutadapt <- "/mnt/picea/home/aschneider/miniconda3/envs/amp_seq/bin/cutadapt"
 system2(cutadapt, args = "--version")
 ```
 
@@ -121,7 +122,7 @@ rbind(FWD.ForwardReads = sapply(gITS7.orients, primerHits, fn = Fs.cut[[2]]),
       REV.ForwardReads = sapply(ITS4.orients, primerHits, fn = Fs.cut[[2]]),
       REV.ReverseReads = sapply(ITS4.orients, primerHits, fn = Rs.cut[[2]]))
 ```
-The sanity check looks good, all primer sequences have been removed from the data (weirdly it still finds one, but I don't think that's gonna be an issue).
+The sanity check looks good, all primer sequences have been removed from the data.
 
 ## Quality profiles
 
@@ -319,32 +320,45 @@ clustfact <- function(file) {
 clus_swarm <- clustfact(here("results/Swarm/results.txt"))
 ```
 
+CONTINUE HERE!
+
 Now we can add this factor as a column to our matrix, and summarise the counts by cluster.
 
 ```{r}
-seqtab.sw <- as.data.frame(cbind(Cluster=clus_swarm$Cluster[match(gsub(";size=\\d+", "", names(seqs_clean_sum)), clus_swarm$ASV)], t(seqtab.nc5)))
+seqtab.sw <- as.data.frame(cbind(Cluster=as.character(clus_swarm$Cluster)[match(gsub("(ASV\\d+);size=\\d+", "\\1", names(seqs_clean_sum)), clus_swarm$ASV)], 
+                                       t(seqtab.nc5)))
+
+seqtab.sw[c(2:ncol(seqtab.sw))] <- sapply(seqtab.sw[c(2:ncol(seqtab.sw))], as.numeric)
 
 seqtab.sw <- group_by(seqtab.sw, Cluster) %>% 
-  summarise_each(funs(sum)) 
-seqtab.sw$Cluster <- paste0("Cluster", seqtab.sw$Cluster)
+  summarise(across(everything(), sum), .groups = 'drop')
+
 seqtab.sw2 <- seqtab.sw
 rownames(seqtab.sw2) <- seqtab.sw$Cluster
 seqtab.sw2 <- data.matrix(seqtab.sw2[,-1])
-seqtab.sw3 <- seqtab.sw2
+seqtab.sw3 <- as.data.frame(seqtab.sw2)
+rownames(seqtab.sw3) <- seqtab.sw$Cluster
+seqtab.sw3 <- seqtab.sw3[match(unique(clus_swarm$Cluster), rownames(seqtab.sw3)),]
+
 ```
 
 The counts are now summarised by cluster. Next we can assign taxonomy to these SOTUs (Swarm Operational Taxonomic Units) and then start with the actual analyses. To assign taxonomy we take the seed sequence of every cluster.
 
 ```{r}
 seqs_clean_swarm <- readDNAStringSet(here("results/Swarm/seeds.fa"))
-names(seqs_clean_swarm) <- seqtab.sw$Cluster 
+clus_swarm2 <- clus_swarm$ASV[match(unique(clus_swarm$Cluster), clus_swarm$Cluster)]
+seqs_clean_swarm <- seqs_clean_swarm[match(clus_swarm2, gsub("(ASV\\d+);size=\\d+;", "\\1", names(seqs_clean_swarm)))]
+all(gsub("(ASV\\d+);size=\\d+;", "\\1", names(seqs_clean_swarm))==clus_swarm2)
 
-rownames(seqtab.sw3) <- as.character(seqs_clean_swarm)
-seqtab.sw3 <- t(seqtab.sw3)
+#Now we can rename
+names(seqs_clean_swarm) <- rownames(seqtab.sw3)
 
 #Link UNITE database
-unite_db <- ("/mnt/picea/storage/reference/Qiime/unite/UNITE_8.2/sh_general_release_dynamic_s_04.02.2020.fasta")
-taxa <- assignTaxonomy(seqtab.sw3, unite_db, tryRC = TRUE, multithread = TRUE)
+unite_db <- ("/mnt/picea/storage/reference/Qiime/unite/UNITE_9.0/sh_general_release_dynamic_16.10.2022.fasta")
+#taxa <- assignTaxonomy(seqs_clean_swarm, unite_db, tryRC = TRUE, multithread = TRUE)
+
+#GOING TO USE CONSTAX INSTEAD.
+writeXStringSet(seqs_clean_swarm, here("results/Swarm/swarm_seeds_clean.fa"))
 ```
 
 ## Filtering and cleaning
@@ -352,20 +366,57 @@ taxa <- assignTaxonomy(seqtab.sw3, unite_db, tryRC = TRUE, multithread = TRUE)
 We can start with cleaning up the taxonomic annotations. Then we filter out very low abundance fungi and use the negative control samples to sieve out probable contamination.
 
 ```{r}
+#Import constax results
+taxa <- read.table(here("results/constax/constax_taxonomy.txt"), sep = "\t", header = TRUE)
+#tax_cs$Species <- gsub("_$", "", gsub(" ", "_", tax_cs$Species))
+#tax_cs$Species <- ifelse(tax_cs$Species==tax_cs$Genus, "", tax_cs$Species)
+taxa <- as.data.frame(sapply(taxa, function(x) gsub("_1$", "", x)))
+
+taxa2 <- taxa
+taxa2[taxa2==""] <- NA
+
+taxa2[is.na(taxa2)] <- "unidentified"
+
+taxa2$Phylum <- ifelse(grepl("unidentified", taxa2$Phylum), 
+                               paste0("Unclassified.", taxa2$Kingdom),
+                               taxa2$Phylum)
+
+#Let's make a function to automate this
+fixNAtax <- function(tax, rank) {
+  coln <- which(colnames(tax)==rank)
+  namen <- colnames(tax)[coln]
+  namen1 <- colnames(tax)[coln-1]
+  tax[,namen] <- ifelse(grepl("Unclassified", tax[,namen1]),
+                        tax[,namen1],
+                        tax[,namen])
+  tax[,namen] <- ifelse(grepl("unidentified", tax[,namen]),
+                        paste0("Unclassified.", tax[,namen1]),
+                        tax[,namen])
+  return(tax)
+}
+
+taxa3 <- fixNAtax(taxa2, "Class")
+taxa3 <- fixNAtax(taxa3, "Order")
+taxa3 <- fixNAtax(taxa3, "Family")
+taxa3 <- fixNAtax(taxa3, "Genus")
+taxa3 <- fixNAtax(taxa3, "Species")
+taxa3$Species <- sub(" ", "_", taxa3$Species)
+```
+
+```{r}
 #Import metadata
 meta <- read.csv(here("doc/Meta_clean.csv"))
-#Clean taxa
-taxa <- gsub("^[[:alpha:]]__", "", taxa)
+
+#CONTINUE HERE!
 #Create clean matrix
-rownames(seqtab.sw2) <- paste0("SOTU", 1:nrow(seqtab.sw2))
+seqtab.sw4 <- seqtab.sw3
+rownames(seqtab.sw4) <- gsub("cluster", "SOTU", rownames(seqtab.sw4))
 
-taxa <- as.data.frame(cbind(SOTU=rownames(seqtab.sw2), sequence=rownames(taxa), taxa))
-
-seqtab.sw4 <- seqtab.sw2
+taxa_clean <- as.data.frame(cbind(SOTU=rownames(seqtab.sw4), sequence=as.character(seqs_clean_swarm), taxa3))
 
 #Adjust tax table
-taxa <- taxa[taxa$SOTU%in%rownames(seqtab.sw4),]
-rownames(taxa) <- taxa$SOTU
+all(taxa_clean$SOTU==rownames(seqtab.sw4))
+rownames(taxa_clean) <- taxa_clean$SOTU
 
 #Adjust meta table
 rownames(meta) <- meta$SciLifeID
@@ -381,8 +432,8 @@ seqtab.sw5 <- seqtab.sw4[,-c(18,19)]
 # DECONTAM after Swarm
 
 ```{r}
-library(decontam)
-colnames(seqtab.sw4) # our blank is the last of 19 samples
+
+#colnames(seqtab.sw4) # our blank is the last of 19 samples
 vector_for_decontam <- c(rep(FALSE, 18), TRUE)
 names(vector_for_decontam) <- colnames(seqtab.sw4)
 
@@ -402,10 +453,10 @@ Save the final objects, and remove the likely contaminants.
 seqtab.sw4_f <- seqtab.sw4[which(!rownames(seqtab.sw4) %in% contam_asvs),]
 track4 <- cbind(track3, decontam=colSums(seqtab.sw4_f))
 seqtab.sw5 <- seqtab.sw5[which(!rownames(seqtab.sw5) %in% contam_asvs),]
-taxa <- taxa[rownames(seqtab.sw5),]
+taxa_clean2 <- taxa_clean[rownames(seqtab.sw5),]
 saveRDS(meta, here("results/meta.rds"))
 saveRDS(seqtab.sw5, here("results/seqtab_final.rds"))
-saveRDS(taxa, here("results/taxa.rds"))
+saveRDS(taxa_clean2, here("results/taxa.rds"))
 saveRDS(track4, here("results/read_stats.rds"))
 ```
 
