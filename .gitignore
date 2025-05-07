@@ -43,3 +43,5 @@ vignettes/*.pdf
 data
 results
 
+# Mac OS
+.DS_Store
