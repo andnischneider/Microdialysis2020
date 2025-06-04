@@ -8,3 +8,5 @@ This repository contains analysis scripts for both ITS and 16S sequencing data, 
 16S data was preprocessed using the [nf-core/ampliseq pipeline](https://nf-co.re/ampliseq/2.6.1/).
 
 Preprocessed 16S and ITS data (ready to be plugged into the scripts) can be downloaded [here](https://zenodo.org/records/15358823).
+
+Raw data has been published in the European Nucleotide Archive (ENA) with the accession PRJEB61550.
